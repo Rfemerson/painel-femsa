@@ -69,7 +69,13 @@ def preparar(records):
         return pd.DataFrame({c: pd.Series(dtype='datetime64[ns]' if c == 'Data' else 'str') for c in COLUNAS})
     df = pd.DataFrame(records)
     aliases = {normalizar(c): c for c in COLUNAS}
-    aliases.update({'CARIMBO DE DATA/HORA': 'Data', 'DATA/HORA': 'Data', 'DATA DE ABERTURA': 'Data'})
+    aliases.update({
+        'CARIMBO DE DATA/HORA': 'Data',
+        'DATA/HORA': 'Data',
+        'DATA DE ABERTURA': 'Data',
+        'TIPO DO CHAMADO': 'Tipo',
+        'TIPO DE CHAMADO': 'Tipo',
+    })
     df = df.rename(columns={c: aliases.get(normalizar(c), c) for c in df.columns})
     if df.columns.duplicated().any() or not set(COLUNAS).issubset(df.columns):
         raise ValueError('Confira os cabeçalhos obrigatórios na aba Base_Painel.')
@@ -89,11 +95,28 @@ def preparar(records):
 
 @st.cache_data(ttl=60, show_spinner=False, max_entries=4)
 def carregar(url, token):
-    response = requests.post(url, json={'token': token}, timeout=(10, 45))
-    response.raise_for_status()
-    payload = response.json()
+    try:
+        response = requests.post(url, json={'token': token}, timeout=(10, 45))
+    except requests.RequestException as exc:
+        raise RuntimeError('Não foi possível conectar ao Apps Script.') from exc
+
+    if response.status_code != 200:
+        raise RuntimeError(f'O Apps Script respondeu com HTTP {response.status_code}.')
+
+    try:
+        payload = response.json()
+    except requests.exceptions.JSONDecodeError as exc:
+        final_host = urlparse(response.url).hostname or ''
+        if 'accounts.google.com' in final_host or 'ServiceLogin' in response.text:
+            raise RuntimeError(
+                'O Apps Script exige login Google. Publique o app da Web com acesso para Qualquer pessoa.'
+            ) from exc
+        raise RuntimeError('O Apps Script não retornou JSON válido.') from exc
+
     if not isinstance(payload, dict) or payload.get('ok') is not True:
-        raise ValueError('A API recusou a consulta. Verifique a configuração e os cabeçalhos.')
+        detail = payload.get('error') if isinstance(payload, dict) else ''
+        raise RuntimeError(f'A API recusou a consulta: {detail or "resposta inválida"}')
+
     return preparar(payload.get('records')), datetime.now().strftime('%d/%m/%Y %H:%M:%S')
 
 
@@ -126,8 +149,11 @@ def main():
     except (KeyError, FileNotFoundError):
         st.error('Configure DATA_API_URL e DATA_API_TOKEN nos secrets do Streamlit.')
         st.stop()
-    except (requests.RequestException, ValueError, TypeError):
-        st.error('Não foi possível carregar os chamados. Verifique a API, os secrets e os cabeçalhos da base e tente atualizar.')
+    except RuntimeError as exc:
+        st.error(str(exc))
+        st.stop()
+    except (ValueError, TypeError) as exc:
+        st.error(f'Não foi possível interpretar os dados da base: {exc}')
         st.stop()
     st.title('Chamados comerciais')
     st.caption(f'Visão operacional • Somente registros válidos • Consulta em {updated} (horário do servidor)')
